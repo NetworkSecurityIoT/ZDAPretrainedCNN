@@ -995,6 +995,130 @@ for label in ax.get_xticklabels():
     label.set_fontweight('bold')
 
 plt.xlabel('Predicted Label', fontsize=12, fontweight='bold')
+#real time
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from PIL import Image
+import os
+
+# --- 1. CONFIGURATION ---
+CSV_FILE_PATH = "/content/captured_iot_traffic.csv"
+#MODEL_PATH = "/content/your_model.h5"  # Ensure this points to your trained model file
+IMAGE_SIZE = 100
+
+# Feature columns MUST match the Scapy logger exactly
+FEAT_COLS = [
+    'Variance', 'ack_flag_number', 'psh_flag_number', 'rst_count',
+    'Header_Length', 'Magnitue', 'TCP', 'UDP', 'Max'
+]
+
+# --- GLOBAL SCALING CONSTANTS ---
+# These must match the Min/Max of your 'iomtdosnorm.csv' training set
+GLOBAL_MIN = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 9.5, 0.0, 0.0, 51.0])
+GLOBAL_MAX = np.array([1.0, 1.0, 1.0, 6064.0, 1589090.9, 54.66, 1.0, 1.0, 1514.0])
+FEATURE_RANGE = (GLOBAL_MAX - GLOBAL_MIN)
+FEATURE_RANGE[FEATURE_RANGE == 0] = 1e-7 # Prevent division by zero
+
+# --- 2. LOAD MODEL & DATA ---
+
+
+try:
+    df = pd.read_csv(CSV_FILE_PATH)
+    if df.empty:
+        print("[!] CSV is empty. Please run your capture script and attack first.")
+        exit()
+except Exception as e:
+    print(f"[!] Error reading CSV: {e}")
+    exit()
+
+# --- 3. IMAGE PREPROCESSING ---
+
+def row_to_image_tensor(row):
+    # 1. Apply Global Normalization (Min-Max Scaling)
+    # Note: Removed .astype('uint8') here to prevent data loss/wrap-around
+    row=row.astype('uint8')
+    norm_row = (row - GLOBAL_MIN) / FEATURE_RANGE
+
+    # Clip values to [0, 1] to handle real-time outliers
+    norm_row = np.clip(norm_row, 0, 1)
+
+    # 2. Reshape 9 features to 3x3 matrix
+    feat_array = norm_row.reshape(3, 3)
+
+    # 3. Scale to 0-255 for pixel intensity
+    scaled = feat_array * 255
+
+    # 4. Create RGB image and resize to model's expected input
+    img = Image.fromarray(scaled.astype(np.uint8), mode='L').convert('RGB')
+    img = img.resize((IMAGE_SIZE, IMAGE_SIZE), Image.NEAREST)
+
+    # 5. Normalize to [0, 1] range for the neural network
+    return np.array(img) / 255.0
+
+# Convert all rows in CSV to an image batch
+print(f"[*] Processing {len(df)} traffic flows...")
+X_test = np.array([row_to_image_tensor(row[FEAT_COLS].values) for _, row in df.iterrows()])
+
+
+
+print("[*] Running Vision Transformer inference...")
+
+# Model.predict returns raw logits because of the training configuration
+raw_predictions = model.predict(X_test, verbose=1)
+
+# Manual Sigmoid function to handle 'from_logits=True' output
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+# Determine class based on output layer type
+if raw_predictions.shape[1] == 1:
+    # Binary classification logic
+    probs = sigmoid(raw_predictions).flatten()
+    print(probs)
+    is_attack = (probs > 0.5).astype(int)
+else:
+    # Multi-class logic (if you updated the model later)
+    is_attack = np.argmax(raw_predictions, axis=1)
+
+# --- 5. PRINT FINAL RESULTS ---
+attack_count = np.sum(is_attack == 1)
+normal_count = np.sum(is_attack == 0)
+
+print("\n" + "="*35)
+print("   REAL-TIME EVALUATION RESULTS")
+print("="*35)
+print(f"Total Traffic Flows: {len(df)}")
+print(f"ATTACK Detected:     {attack_count}")
+print(f"NORMAL Traffic:      {normal_count}")
+print(f"Attack Percentage:   {(attack_count/len(df))*100:.2f}%")
+print("="*35)
+"""
+# --- 4. INFERENCE ---
+print("[*] Running Vision Transformer inference...")
+predictions = model.predict(X_test, verbose=0)
+
+# Determine class based on output layer type
+if predictions.shape[1] == 1:
+    # Binary classification with Sigmoid
+    probs = predictions.flatten()
+    is_attack = (probs > 0.5).astype(int)
+else:
+    # Multi-class classification with Softmax
+    is_attack = np.argmax(predictions, axis=1)
+
+# --- 5. PRINT FINAL RESULTS ---
+attack_count = np.sum(is_attack == 1)
+normal_count = np.sum(is_attack == 0)
+
+print("\n" + "="*30)
+print("  REAL-TIME EVALUATION RESULTS")
+print("="*30)
+print(f"Total Traffic Flows: {len(df)}")
+print(f"Attack Traffic:      {attack_count}")
+print(f"Normal Traffic:      {normal_count}")
+print("="*30)
+"""
 plt.ylabel('True Label', fontsize=12, fontweight='bold')
 #plt.title('Confusion Matrix', fontsize=14, fontweight='bold')
 plt.show()
